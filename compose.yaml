@@ -1,0 +1,30 @@
+services:
+  flipkart-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flipkart-restock-monitor
+    init: true
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      # Persistent SQLite database volume mount
+      - ./data:/app/data
+    ports:
+      # Healthcheck endpoint bound to localhost for security
+      - "127.0.0.1:8080:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+        reservations:
+          cpus: '0.10'
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    stop_grace_period: 30s
