@@ -12,7 +12,12 @@ import requests
 
 from app.models import AvailabilityState, StockObservation
 from app.providers.base import StockProvider
-from app.utils import extract_title_from_flipkart_url, is_valid_product_title, resolve_product_title
+from app.utils import (
+    clean_flipkart_url,
+    extract_title_from_flipkart_url,
+    is_valid_product_title,
+    resolve_product_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +41,7 @@ class FlipkartWebStockProvider(StockProvider):
 
     DEFAULT_USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     )
 
     def __init__(self, timeout_seconds: int = 15, default_product_name: Optional[str] = None):
@@ -44,6 +49,7 @@ class FlipkartWebStockProvider(StockProvider):
         self._default_product_name = default_product_name
         self._provider_name = "flipkart_web_inspector"
         self._last_observed: dict[str, AvailabilityState] = {}
+        self._session = requests.Session()
 
     @property
     def provider_name(self) -> str:
@@ -184,15 +190,25 @@ class FlipkartWebStockProvider(StockProvider):
     def check_availability(self, product_url: str) -> StockObservation:
         """Inspect Flipkart product page for stock availability."""
         product_id = self.extract_product_id(product_url)
+        target_url = clean_flipkart_url(product_url) or product_url
         headers = {
             "User-Agent": self.DEFAULT_USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Cache-Control": "no-cache",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-IN,en-US;q=0.9,en;q=0.8,hi;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Cache-Control": "max-age=0",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
         }
 
         try:
-            response = requests.get(product_url, headers=headers, timeout=self._timeout_seconds, allow_redirects=True)
+            response = self._session.get(target_url, headers=headers, timeout=self._timeout_seconds, allow_redirects=True)
 
             # Check for actual bot blocks or access denials
             html_lower = response.text.lower()
