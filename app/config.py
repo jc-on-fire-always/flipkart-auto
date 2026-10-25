@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.models import MonitoredProduct
 
 
 class Settings(BaseSettings):
@@ -19,9 +23,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Monitored Product
+    # Monitored Product Configuration
     PRODUCT_NAME: str = Field(..., description="Human-readable product name")
     PRODUCT_URL: str = Field(..., description="Full Flipkart product listing URL")
+    PRODUCTS_FILE: str = Field(default="products.json", description="Optional JSON file for tracking multiple products")
+    REQUEST_STAGGER_SECONDS: float = Field(default=2.0, ge=0.0, description="Pause between checks in a multi-product cycle")
     POLL_INTERVAL_SECONDS: int = Field(default=60, ge=5, description="Polling interval in seconds")
     MAX_PRODUCT_PRICE: Optional[float] = Field(default=None, ge=0.0, description="Optional price ceiling")
     INITIAL_ALERT_ON_STARTUP: bool = Field(default=False, description="Send alert if in stock on initial run")
@@ -147,3 +153,50 @@ class Settings(BaseSettings):
                 )
 
         return self
+
+    def get_monitored_products(self, include_disabled: bool = False) -> list[MonitoredProduct]:
+        """
+        Retrieve monitored products.
+
+        If PRODUCTS_FILE exists and contains items, loads from that file.
+        Otherwise falls back to the single PRODUCT_NAME and PRODUCT_URL from environment.
+        """
+        products_path = Path(self.PRODUCTS_FILE)
+        if products_path.is_file():
+            try:
+                with open(products_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list) and len(data) > 0:
+                    products: list[MonitoredProduct] = []
+                    for item in data:
+                        if isinstance(item, dict):
+                            prod = MonitoredProduct(**item)
+                            # Enforce SSRF host restriction
+                            self.validate_product_url(prod.url)
+                            if prod.enabled or include_disabled:
+                                products.append(prod)
+                    if products or include_disabled:
+                        return products
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Could not parse %s (%s). Falling back to environment product.",
+                    self.PRODUCTS_FILE,
+                    exc,
+                )
+
+        return [
+            MonitoredProduct(
+                name=self.PRODUCT_NAME,
+                url=self.PRODUCT_URL,
+                max_price=self.MAX_PRODUCT_PRICE,
+                enabled=True,
+            )
+        ]
+
+    def save_monitored_products(self, products: list[MonitoredProduct]) -> None:
+        """Serialize the list of monitored products into PRODUCTS_FILE."""
+        products_path = Path(self.PRODUCTS_FILE)
+        data = [p.model_dump() for p in products]
+        with open(products_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)

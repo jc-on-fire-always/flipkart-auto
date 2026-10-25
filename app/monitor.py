@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import signal
 import threading
 from typing import Optional, Tuple, List
@@ -10,7 +11,7 @@ from typing import Optional, Tuple, List
 from app.config import Settings
 from app.database import DatabaseManager
 from app.health import HealthServer
-from app.models import NotificationResult, RestockEvent, StockObservation
+from app.models import MonitoredProduct, NotificationResult, RestockEvent, StockObservation
 from app.notifications.base import BaseNotifier
 from app.providers.base import StockProvider
 from app.providers.factory import get_stock_provider
@@ -26,7 +27,7 @@ class FlipkartMonitor:
     Continuous 24/7 background worker monitoring product availability.
 
     Coordinates database persistence, provider inspection, transition logic,
-    multi-channel notifications, and health monitoring.
+    multi-channel notifications, and health monitoring for one or more products.
     """
 
     def __init__(
@@ -57,9 +58,26 @@ class FlipkartMonitor:
             stop_event=self._stop_event,
         )
 
-    def check_once(self) -> Tuple[Optional[StockObservation], Optional[RestockEvent], List[NotificationResult]]:
+    def check_once(
+        self, product: Optional[MonitoredProduct] = None
+    ) -> Tuple[Optional[StockObservation], Optional[RestockEvent], List[NotificationResult]]:
         """Perform a single isolated stock check and dispatch alert if a restock is detected."""
-        obs, restock_event = self._stock_service.execute_stock_check()
+        if product is None:
+            products = self._settings.get_monitored_products()
+            matching = [p for p in products if p.url == self._settings.PRODUCT_URL]
+            if matching:
+                product = matching[0]
+            elif not any(p.url == self._settings.PRODUCT_URL for p in products):
+                product = MonitoredProduct(
+                    name=self._settings.PRODUCT_NAME,
+                    url=self._settings.PRODUCT_URL,
+                    max_price=self._settings.MAX_PRODUCT_PRICE,
+                    enabled=True,
+                )
+            else:
+                product = products[0] if products else None
+
+        obs, restock_event = self._stock_service.execute_stock_check(product=product)
         notifications: List[NotificationResult] = []
 
         if restock_event:
@@ -69,17 +87,43 @@ class FlipkartMonitor:
 
         return obs, restock_event, notifications
 
+    def check_all(self) -> List[Tuple[Optional[StockObservation], Optional[RestockEvent], List[NotificationResult]]]:
+        """Perform stock checks for all configured products with polite delay staggering between requests."""
+        products = self._settings.get_monitored_products()
+        results: List[Tuple[Optional[StockObservation], Optional[RestockEvent], List[NotificationResult]]] = []
+
+        for idx, prod in enumerate(products):
+            if self._stop_event.is_set():
+                break
+
+            logger.info("Checking stock [%s/%s]: %s", idx + 1, len(products), prod.name)
+            res = self.check_once(product=prod)
+            results.append(res)
+
+            # Stagger requests between products in batch to avoid triggering rate limits
+            if idx < len(products) - 1 and not self._stop_event.is_set():
+                stagger = max(0.5, self._settings.REQUEST_STAGGER_SECONDS + random.uniform(-0.2, 0.4))
+                logger.debug("Staggering next product check by %.2fs...", stagger)
+                self._stop_event.wait(timeout=stagger)
+
+        return results
+
     def run(self) -> None:
         """Run the continuous 24/7 monitoring loop."""
         self._setup_signals()
         self._health_server.start()
 
+        products = self._settings.get_monitored_products()
+
         logger.info("=" * 60)
         logger.info("Flipkart 24/7 Restock Monitor started successfully.")
-        logger.info("Target Product : %s", self._settings.PRODUCT_NAME)
-        logger.info("Product URL    : %s", self._settings.PRODUCT_URL)
+        logger.info("Monitored Products (%s total):", len(products))
+        for p in products:
+            price_limit = f" (Max: Rs. {p.max_price:,.2f})" if p.max_price else ""
+            logger.info("  - %s%s: %s", p.name, price_limit, p.url)
         logger.info("Active Provider: %s", self._provider.provider_name)
         logger.info("Poll Interval  : %s seconds", self._settings.POLL_INTERVAL_SECONDS)
+        logger.info("Stagger Delay  : %s seconds", self._settings.REQUEST_STAGGER_SECONDS)
         logger.info("Alert Channels : %s", self._settings.NOTIFICATION_CHANNELS)
         logger.info("Health Check   : http://%s:%s/health", self._settings.HEALTH_HOST, self._settings.HEALTH_PORT)
         logger.info("=" * 60)
@@ -87,13 +131,15 @@ class FlipkartMonitor:
         try:
             while not self._stop_event.is_set():
                 try:
-                    obs, restock_event, notifs = self.check_once()
-                    if obs:
-                        logger.debug(
-                            "Check completed: Status=%s Price=%s",
-                            obs.availability.value,
-                            f"₹{obs.price}" if obs.price is not None else "N/A",
-                        )
+                    batch_results = self.check_all()
+                    for obs, event, notifs in batch_results:
+                        if obs:
+                            logger.debug(
+                                "Product '%s' check completed: Status=%s Price=%s",
+                                obs.product_name,
+                                obs.availability.value,
+                                f"Rs. {obs.price:,.2f}" if obs.price is not None else "N/A",
+                            )
                 except Exception as exc:
                     logger.error("Unexpected error in monitoring cycle: %s", exc, exc_info=True)
 

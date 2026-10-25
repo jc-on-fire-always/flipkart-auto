@@ -1,7 +1,6 @@
 """SMTP Email notification dispatcher with HTML alternative and retry resilience."""
-
 from __future__ import annotations
-
+from datetime import timedelta
 import logging
 import random
 import smtplib
@@ -19,6 +18,7 @@ from app.models import (
     RestockEvent,
 )
 from app.notifications.base import BaseNotifier
+from app.utils import resolve_product_title
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +62,18 @@ class EmailNotifier(BaseNotifier):
                 timestamp_utc=datetime.now(timezone.utc),
             )
 
-        detected_str = event.detected_at_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+        product_name = resolve_product_title(
+            primary=event.product_name,
+            url=event.product_url,
+            fallback_default="Flipkart Monitored Product",
+        )
+        detected_str = event.detected_at_utc.astimezone(timezone(timedelta(hours=5.5))).strftime("%Y-%m-%d %H:%M:%S IST")
         price_str = f"₹{event.price:,.2f}" if event.price is not None else "Check official listing"
-        subject = f"Flipkart Restock Alert — {event.product_name}"
+        subject = f"Flipkart Restock Alert — {product_name}"
 
         plain_text = (
             "A restock has been detected for your monitored product.\n\n"
-            f"Product: {event.product_name}\n\n"
+            f"Product: {product_name}\n\n"
             "Availability: Reported IN STOCK\n\n"
             f"Detected at: {detected_str}\n\n"
             f"Price: {price_str}\n\n"
@@ -92,7 +97,7 @@ class EmailNotifier(BaseNotifier):
     <table style="width: 100%; border-collapse: collapse; margin: 15px 0;">
       <tr>
         <td style="padding: 8px 0; font-weight: bold; width: 120px;">Product:</td>
-        <td style="padding: 8px 0;">{event.product_name}</td>
+        <td style="padding: 8px 0;">{product_name}</td>
       </tr>
       <tr>
         <td style="padding: 8px 0; font-weight: bold;">Availability:</td>
@@ -113,7 +118,6 @@ class EmailNotifier(BaseNotifier):
       </a>
     </div>
     <p style="font-size: 12px; color: #757575; margin-top: 25px; border-top: 1px solid #eeeeee; padding-top: 15px;">
-      Direct Link: <a href="{event.product_url}" style="color: #2874f0;">{event.product_url}</a><br>
       Please verify availability, product variant, delivery details, and final price before placing the order.
     </p>
   </div>

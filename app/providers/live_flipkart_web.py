@@ -12,6 +12,7 @@ import requests
 
 from app.models import AvailabilityState, StockObservation
 from app.providers.base import StockProvider
+from app.utils import extract_title_from_flipkart_url, is_valid_product_title, resolve_product_title
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,9 @@ class FlipkartWebStockProvider(StockProvider):
         clean = re.sub(r"[^a-zA-Z0-9]", "_", product_url)
         return clean[:32]
 
-    def _extract_title_and_price(self, html: str, state_str: Optional[str] = None) -> tuple[str, Optional[float]]:
+    def _extract_title_and_price(
+        self, html: str, state_str: Optional[str] = None, product_url: Optional[str] = None
+    ) -> tuple[str, Optional[float]]:
         """Accurately extract the true product title and price, ignoring sponsored ads and template placeholders."""
         title: Optional[str] = None
         price: Optional[float] = None
@@ -80,9 +83,16 @@ class FlipkartWebStockProvider(StockProvider):
 
                     # Extract true title from ATLAS_PRODUCT_TITLE widget
                     if ("PRODUCT_TITLE" in imp or "PRODUCT_TITLE" in type_name) and not title:
-                        ell = dls.get("customEllipsisData_0", {}).get("value", {}).get("prependingText")
-                        if ell and "{TITLE}" not in ell and "{" not in ell:
-                            title = ell.strip()
+                        candidates = [
+                            dls.get("customEllipsisData_0", {}).get("value", {}).get("prependingText"),
+                            dls.get("title_0", {}).get("value", {}).get("text"),
+                            dls.get("name_0", {}).get("value", {}).get("text"),
+                            dls.get("title", {}).get("value", {}).get("text"),
+                        ]
+                        for c in candidates:
+                            if is_valid_product_title(c):
+                                title = c.strip()
+                                break
 
                     # Extract true selling price from ATLAS_PRODUCT_PRICING_SUMMARY widget
                     if ("PRICING_SUMMARY" in imp or "PRODUCT_PRICING" in imp) and price is None:
@@ -132,26 +142,42 @@ class FlipkartWebStockProvider(StockProvider):
                 price = float(class_m.group(1).replace(',', ''))
 
         # Fallback title from OpenGraph, H1, or <title>
-        if not title or "{TITLE}" in title or "{" in title or title == "Flipkart Product":
+        if not is_valid_product_title(title):
+            cand: Optional[str] = None
             og_match = re.search(r'<meta\s+(?:property|name)=["\']og:title["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
-            cand = og_match.group(1) if og_match else ""
-            if not cand or "{TITLE}" in cand or "{" in cand:
+            if og_match:
+                c = og_match.group(1).split("|")[0].split(" - Buy")[0].strip()
+                if is_valid_product_title(c):
+                    cand = c
+
+            if not cand:
+                twitter_match = re.search(r'<meta\s+name=["\']twitter:title["\']\s+content=["\'](.*?)["\']', html, re.IGNORECASE)
+                if twitter_match:
+                    c = twitter_match.group(1).split("|")[0].split(" - Buy")[0].strip()
+                    if is_valid_product_title(c):
+                        cand = c
+
+            if not cand:
                 h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.IGNORECASE | re.DOTALL)
                 if h1_match:
-                    cand = re.sub(r'<[^>]+>', '', h1_match.group(1)).strip()
-            if not cand or "{TITLE}" in cand or "{" in cand:
-                title_match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE)
-                if title_match:
-                    cand = title_match.group(1)
+                    c = re.sub(r'<[^>]+>', '', h1_match.group(1)).split("|")[0].split(" - Buy")[0].strip()
+                    if is_valid_product_title(c):
+                        cand = c
 
-            # Strip Flipkart suffixes
-            if cand:
-                cand = cand.split("|")[0].split(" - Buy")[0].strip()
+            if not cand:
+                for tm in re.finditer(r"<title>(.*?)</title>", html, re.IGNORECASE):
+                    raw_title = tm.group(1).strip()
+                    c = raw_title.split("|")[0].split(" - Buy")[0].strip()
+                    if is_valid_product_title(c):
+                        cand = c
+                        break
 
-            if not cand or "{TITLE}" in cand or "{" in cand or cand == "Flipkart Product":
-                title = self._default_product_name or "Flipkart Product"
-            else:
-                title = cand
+            title = resolve_product_title(
+                primary=cand,
+                secondary=self._default_product_name,
+                url=product_url,
+                fallback_default=self._default_product_name or "Flipkart Product",
+            )
 
         return title, price
 
@@ -202,7 +228,7 @@ class FlipkartWebStockProvider(StockProvider):
             html = response.text
             state_match = re.search(r"window\.__INITIAL_STATE__\s*=\s*({.*?});\s*</script>", html, re.DOTALL)
             state_str = state_match.group(1) if state_match else None
-            title, price = self._extract_title_and_price(html, state_str=state_str)
+            title, price = self._extract_title_and_price(html, state_str=state_str, product_url=product_url)
 
             # 1. Inspect window.__INITIAL_STATE__ (Most accurate Flipkart server-rendered state)
             if state_str:
@@ -267,9 +293,15 @@ class FlipkartWebStockProvider(StockProvider):
             json_ld_state, json_ld_price, json_ld_title = self._parse_json_ld(html)
             if json_ld_state is not None:
                 self._last_observed[product_id] = json_ld_state
+                resolved_title = resolve_product_title(
+                    primary=json_ld_title,
+                    secondary=title,
+                    url=product_url,
+                    fallback_default=self._default_product_name or "Flipkart Product",
+                )
                 return StockObservation(
                     product_id=product_id,
-                    product_name=json_ld_title or title,
+                    product_name=resolved_title,
                     product_url=product_url,
                     availability=json_ld_state,
                     observed_at_utc=datetime.now(timezone.utc),
@@ -343,7 +375,8 @@ class FlipkartWebStockProvider(StockProvider):
 
                 for item in items:
                     if isinstance(item, dict) and item.get("@type") == "Product":
-                        title = item.get("name")
+                        raw_title = item.get("name")
+                        title = str(raw_title).strip() if is_valid_product_title(raw_title) else None
                         offers = item.get("offers", {})
                         if isinstance(offers, list) and offers:
                             offers = offers[0]

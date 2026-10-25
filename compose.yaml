@@ -11,6 +11,7 @@ services:
     volumes:
       # Persistent SQLite database volume mount
       - ./data:/app/data
+      - ./products.json:/app/products.json
     ports:
       # Healthcheck endpoint bound to localhost for security
       - "127.0.0.1:8080:8080"

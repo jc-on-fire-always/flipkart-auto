@@ -9,12 +9,14 @@ from app.config import Settings
 from app.database import DatabaseManager
 from app.models import (
     AvailabilityState,
+    MonitoredProduct,
     ProductRecord,
     RestockEvent,
     RestockEventStatus,
     StockObservation,
 )
 from app.providers.base import StockProvider
+from app.utils import is_valid_product_title, resolve_product_title
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +42,9 @@ class StockService:
         self._settings = settings
         self._db = db_manager
         self._provider = provider
-        self._is_first_check = True
+        self._first_checks: dict[str, bool] = {}
 
-        # Initialize product in persistence
+        # Initialize default product in persistence
         self._product = self._db.get_or_create_product(
             product_id=self._get_product_id(settings.PRODUCT_URL),
             name=settings.PRODUCT_NAME,
@@ -56,7 +58,9 @@ class StockService:
         except Exception:
             return "product_monitored"
 
-    def execute_stock_check(self) -> Tuple[Optional[StockObservation], Optional[RestockEvent]]:
+    def execute_stock_check(
+        self, product: Optional[MonitoredProduct] = None
+    ) -> Tuple[Optional[StockObservation], Optional[RestockEvent]]:
         """
         Execute an isolated stock check for the monitored product.
 
@@ -64,17 +68,19 @@ class StockService:
           Tuple of (observation, restock_event).
           restock_event will be None if no valid restock transition occurred.
         """
-        product_id = self._product.product_id
-        url = self._settings.PRODUCT_URL
+        prod_name = product.name if product else self._settings.PRODUCT_NAME
+        url = product.url if product else self._settings.PRODUCT_URL
+        prod_max_price = product.max_price if product and product.max_price is not None else self._settings.MAX_PRODUCT_PRICE
+        product_id = self._get_product_id(url)
 
         # 1. Retrieve current product state from persistence BEFORE the check
         product_record = self._db.get_product(product_id)
         if not product_record:
             product_record = self._db.get_or_create_product(
                 product_id=product_id,
-                name=self._settings.PRODUCT_NAME,
+                name=prod_name,
                 url=url,
-                max_price=self._settings.MAX_PRODUCT_PRICE,
+                max_price=prod_max_price,
             )
 
         previous_state = AvailabilityState(product_record.last_known_availability)
@@ -108,8 +114,9 @@ class StockService:
         current_state = observation.availability
 
         # 4. Handle initial startup check
-        if self._is_first_check:
-            self._is_first_check = False
+        is_first = self._first_checks.get(product_id, True)
+        if is_first:
+            self._first_checks[product_id] = False
             if previous_state == AvailabilityState.UNKNOWN:
                 logger.info(
                     "Initial check completed. Baselining state to %s (Product: '%s').",
@@ -123,6 +130,19 @@ class StockService:
                     consecutive_in_stock_count=new_consecutive,
                 )
                 if current_state == AvailabilityState.IN_STOCK and self._settings.INITIAL_ALERT_ON_STARTUP:
+                    if (
+                        prod_max_price is not None
+                        and observation.price is not None
+                        and observation.price > prod_max_price
+                    ):
+                        logger.info(
+                            "Product '%s' in stock on startup, but price Rs. %s exceeds configured maximum Rs. %s. Alert suppressed.",
+                            product_record.name,
+                            observation.price,
+                            prod_max_price,
+                        )
+                        return observation, None
+
                     logger.info("INITIAL_ALERT_ON_STARTUP is enabled; triggering initial restock alert.")
                     event = self._build_restock_event(product_record, observation, previous_state)
                     return observation, event
@@ -144,14 +164,15 @@ class StockService:
 
             # Check price ceiling if configured and price is known
             if (
-                self._settings.MAX_PRODUCT_PRICE is not None
+                prod_max_price is not None
                 and observation.price is not None
-                and observation.price > self._settings.MAX_PRODUCT_PRICE
+                and observation.price > prod_max_price
             ):
                 logger.info(
-                    "Product in stock, but price ₹%s exceeds configured maximum ₹%s. Alert suppressed.",
+                    "Product '%s' in stock, but price Rs. %s exceeds configured maximum Rs. %s. Alert suppressed.",
+                    product_record.name,
                     observation.price,
-                    self._settings.MAX_PRODUCT_PRICE,
+                    prod_max_price,
                 )
                 self._db.update_product_state(product_id, consecutive_in_stock_count=new_consecutive)
                 return observation, None
@@ -194,9 +215,23 @@ class StockService:
     def _build_restock_event(
         self, product: ProductRecord, obs: StockObservation, previous_state: AvailabilityState
     ) -> RestockEvent:
+        # Safely resolve product title, ensuring placeholders like {TITLE} or generic names
+        # never override a clean, configured product name.
+        resolved_title = resolve_product_title(
+            primary=obs.product_name,
+            secondary=product.name,
+            url=product.url,
+            fallback_default="Flipkart Monitored Product",
+        )
+        if is_valid_product_title(product.name) and (
+            not is_valid_product_title(obs.product_name)
+            or obs.product_name.strip().lower() in ("flipkart product", "flipkart listing", "flipkart")
+        ):
+            resolved_title = product.name.strip()
+
         event = RestockEvent(
             product_id=product.product_id,
-            product_name=obs.product_name or product.name,
+            product_name=resolved_title,
             product_url=product.url,
             detected_at_utc=obs.observed_at_utc,
             price=obs.price,

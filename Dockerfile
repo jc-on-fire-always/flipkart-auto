@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application source
 COPY app/ /app/app/
+COPY products.json* /app/
 
 # Create persistent directories and configure non-root user (UID 1000 for Linux host bind mounts)
 RUN (groupadd -g 1000 appgroup 2>/dev/null || groupadd -r appgroup) \

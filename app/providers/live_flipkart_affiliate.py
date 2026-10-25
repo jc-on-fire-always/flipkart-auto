@@ -11,6 +11,7 @@ import requests
 
 from app.models import AvailabilityState, StockObservation
 from app.providers.base import StockProvider
+from app.utils import resolve_product_title
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,8 @@ class FlipkartAffiliateStockProvider(StockProvider):
 
             base_info = data.get("productBaseInfoV1", {})
             in_stock = base_info.get("inStock", False)
-            title = base_info.get("title", "Flipkart Product")
+            raw_title = base_info.get("title", "")
+            title = resolve_product_title(primary=raw_title, url=product_url, fallback_default="Flipkart Product")
             selling_price = None
             price_info = base_info.get("flipkartSellingPrice")
             if price_info and isinstance(price_info, dict):

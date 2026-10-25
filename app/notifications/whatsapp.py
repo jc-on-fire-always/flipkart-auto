@@ -1,6 +1,6 @@
 """Meta WhatsApp Cloud API notification dispatcher."""
-
 from __future__ import annotations
+from datetime import timedelta
 
 import logging
 import random
@@ -19,6 +19,7 @@ from app.models import (
     RestockEvent,
 )
 from app.notifications.base import BaseNotifier
+from app.utils import resolve_product_title, shorten_url
 
 logger = logging.getLogger(__name__)
 
@@ -63,23 +64,30 @@ class WhatsAppNotifier(BaseNotifier):
                 timestamp_utc=datetime.now(timezone.utc),
             )
 
-        sanitized_name = self._sanitize_text(event.product_name)
-        detected_str = event.detected_at_utc.strftime("%Y-%m-%d %H:%M:%S UTC")
+        product_name = resolve_product_title(
+            primary=event.product_name,
+            url=event.product_url,
+            fallback_default="Flipkart Monitored Product",
+        )
+        sanitized_name = self._sanitize_text(product_name)
+        ist_tz = timezone(timedelta(hours=5.5))
+        detected_str = event.detected_at_utc.astimezone(ist_tz).strftime("%Y-%m-%d %H:%M:%S IST")
         price_str = f"₹{event.price:,.2f}" if event.price is not None else "Check official listing"
+        shortened_url = shorten_url(event.product_url)
 
         if self._message_mode == "template":
             payload = self._build_template_payload(
                 product_name=sanitized_name,
                 detected_at=detected_str,
                 price=price_str,
-                product_url=event.product_url,
+                product_url=shortened_url,
             )
         else:
             message_text = self._build_text_message(
                 product_name=sanitized_name,
                 detected_at=detected_str,
                 price=price_str,
-                product_url=event.product_url,
+                product_url=shortened_url,
             )
             payload = self._build_text_payload(message_text)
 
@@ -98,7 +106,7 @@ class WhatsAppNotifier(BaseNotifier):
         if self._message_mode == "template":
             payload = self._build_template_payload(
                 product_name="[DIAGNOSTIC TEST] Flipkart Monitor",
-                detected_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                detected_at=datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=5.5))).strftime("%Y-%m-%d %H:%M:%S IST"),
                 price="Rs. 0.00 (Test Only)",
                 product_url="https://www.flipkart.com",
             )
@@ -121,6 +129,7 @@ class WhatsAppNotifier(BaseNotifier):
 
         attempts = 0
         last_error = ""
+        alt_lang_attempted = False
 
         for attempt in range(1, self._max_retries + 1):
             attempts = attempt
@@ -157,6 +166,21 @@ class WhatsAppNotifier(BaseNotifier):
                         pass
                     err_msg = error_json.get("message", response.text)
                     code = error_json.get("code")
+
+                    # Handle #132001: Template name does not exist in the translation (e.g. en vs en_US)
+                    if code == 132001 and payload.get("type") == "template" and not alt_lang_attempted:
+                        alt_lang_attempted = True
+                        curr_code = payload.get("template", {}).get("language", {}).get("code")
+                        alt_code = "en" if curr_code == "en_US" else ("en_US" if curr_code == "en" else None)
+                        if alt_code:
+                            logger.warning(
+                                "Template translation '%s' not found (#132001). Retrying with alternative '%s'...",
+                                curr_code,
+                                alt_code,
+                            )
+                            payload["template"]["language"]["code"] = alt_code
+                            continue
+
                     logger.error("WhatsApp API client error (HTTP %s, Code %s): %s", response.status_code, code, err_msg)
                     return NotificationResult(
                         channel=self.channel_name,

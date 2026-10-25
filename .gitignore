@@ -60,3 +60,4 @@ htmlcov/
 *.swo
 .DS_Store
 Thumbs.db
+CLI_COMMANDS.txt

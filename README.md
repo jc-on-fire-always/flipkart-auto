@@ -190,27 +190,61 @@ pip install -r requirements.txt
 
 ### 2. Run Automated Tests
 ```bash
-# Run complete test suite (28 tests covering transitions, debouncing, retries, SSRF, & health)
+# Run complete test suite (33 tests covering multi-product batching, transitions, debouncing, retries, SSRF, & health)
 pytest -v
 ```
 
-### 3. CLI Operational Commands
+### 3. Multi-Product Management & CLI Commands
+
+You can track **any number of products simultaneously**. The monitor reads from `products.json` with polite request staggering (configurable `REQUEST_STAGGER_SECONDS=2.0` with jitter) to prevent Flipkart rate-limiting, and tracks inventory states, baseline confirmations, and price ceilings independently per product.
+
 ```bash
-# 1. Run a single live stock check and print availability, price, and confidence
+# 1. List all currently configured monitored products
+python -m app.cli list-products
+
+# 2. Add a new product to monitor with optional price ceiling
+python -m app.cli add-product --name "PUMA Sneakers" --url "https://www.flipkart.com/..." --max-price 2500.0
+
+# 3. Remove a product by index number, name, or URL
+python -m app.cli remove-product 1
+
+# 4. Run a live stock check on all configured products (or target a specific one with -p)
 python -m app.cli check-once
+python -m app.cli check-once -p 1
+python -m app.cli check-once -p "PUMA"
 
-# 2. Test notification channels (dispatches diagnostic alerts to WhatsApp & Email)
-python -m app.cli test-notifications
-
-# 3. Simulate a live restock event (triggers full restock alert format immediately)
-python -m app.cli simulate-restock
-
-# 4. Inspect local database status and observation history
+# 5. Inspect database health, tracked product states, and restock event history
 python -m app.cli status
 
-# 5. Start continuous 24/7 background monitor daemon locally
+# 6. Test notification channels (dispatches diagnostic alerts to WhatsApp & Email)
+python -m app.cli test-notifications
+
+# 7. Simulate a live restock event (triggers full restock alert format immediately)
+python -m app.cli simulate-restock
+
+# 8. Start continuous 24/7 background monitor daemon
 python -m app.cli run
 ```
+
+#### `products.json` Format
+If you prefer editing the file directly, `products.json` resides in the project root:
+```json
+[
+  {
+    "name": "PUMA ST Runner v4 SD Sneakers For Men",
+    "url": "https://www.flipkart.com/puma-st-runner-v4-sd-sneakers-men/p/itmaae3d5af4902c?pid=SHOHDMPEGCHTGP52...",
+    "max_price": 2500.0,
+    "enabled": true
+  },
+  {
+    "name": "NUMERO UNO Men Loose Fit Mid Rise Blue Jeans",
+    "url": "https://www.flipkart.com/numero-uno-loose-fit-men-blue-jeans/p/itm0d72205b89486?pid=JEAHPHDNH7HSNGFZ...",
+    "max_price": 1000.0,
+    "enabled": true
+  }
+]
+```
+*(If `products.json` is absent, the monitor seamlessly falls back to the single `PRODUCT_NAME` and `PRODUCT_URL` configured in `.env`)*.
 
 ---
 
@@ -300,6 +334,8 @@ Expected health JSON:
 | :--- | :--- |
 | **View Live Monitor Logs** | `docker compose logs -f flipkart-monitor` |
 | **Check Container Status** | `docker compose ps` |
+| **List Monitored Products** | `docker compose exec flipkart-monitor python -m app.cli list-products` |
+| **Add New Product** | `docker compose exec flipkart-monitor python -m app.cli add-product --name "..." --url "..."` |
 | **Inspect DB & State** | `docker compose exec flipkart-monitor python -m app.cli status` |
 | **Run a One-Time Live Check** | `docker compose run --rm flipkart-monitor check-once` |
 | **Simulate Restock Alert** | `docker compose run --rm flipkart-monitor simulate-restock` |

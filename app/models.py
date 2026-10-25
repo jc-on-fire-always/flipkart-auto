@@ -56,6 +56,14 @@ class RestockEventStatus(str, Enum):
 
 # --- Pydantic Data Models ---
 
+class MonitoredProduct(BaseModel):
+    """Configuration definition for an individually monitored product."""
+    name: str
+    url: str
+    max_price: Optional[float] = None
+    enabled: bool = True
+
+
 class StockObservation(BaseModel):
     """Observation recorded during a stock inspection."""
     product_id: str

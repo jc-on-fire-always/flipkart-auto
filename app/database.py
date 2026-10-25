@@ -129,6 +129,27 @@ class DatabaseManager:
                 session.expunge(product)
             return product
 
+    def get_all_products(self) -> list[ProductRecord]:
+        """Retrieve all tracked products ordered by product_id."""
+        with self.session_scope() as session:
+            products = session.query(ProductRecord).order_by(ProductRecord.product_id.asc()).all()
+            for p in products:
+                session.expunge(p)
+            return products
+
+    def get_recent_events(self, limit: int = 5) -> list[RestockEventRecord]:
+        """Retrieve latest restock events."""
+        with self.session_scope() as session:
+            events = (
+                session.query(RestockEventRecord)
+                .order_by(RestockEventRecord.detected_at_utc.desc())
+                .limit(limit)
+                .all()
+            )
+            for e in events:
+                session.expunge(e)
+            return events
+
     def record_observation(self, obs: StockObservation) -> None:
         """Persist observation record to history and update product last check timestamp."""
         with self.session_scope() as session:
@@ -158,11 +179,28 @@ class DatabaseManager:
         with self.session_scope() as session:
             product = session.query(ProductRecord).filter_by(product_id=product_id).first()
             if product:
-                if availability is not None and availability != AvailabilityState.UNKNOWN:
+                if availability is not None:
                     product.last_known_availability = availability.value
                 if consecutive_in_stock_count is not None:
                     product.consecutive_in_stock_count = consecutive_in_stock_count
                 product.updated_at_utc = datetime.now(timezone.utc)
+
+    def clear_cooldown(self, product_id: str) -> int:
+        """Expire all active alert cooldowns for a given product."""
+        with self.session_scope() as session:
+            now = datetime.now(timezone.utc)
+            active_events = (
+                session.query(RestockEventRecord)
+                .filter(
+                    RestockEventRecord.product_id == product_id,
+                    RestockEventRecord.cooldown_until_utc > now,
+                )
+                .all()
+            )
+            count = len(active_events)
+            for ev in active_events:
+                ev.cooldown_until_utc = now
+            return count
 
     def is_in_cooldown(self, product_id: str) -> bool:
         """Check if product is within alert cooldown window."""
